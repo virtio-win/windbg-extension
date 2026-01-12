@@ -670,6 +670,9 @@ public:
             dirs.Add(TopDir);
         } else {
             CPickFolderDialog d;
+            CString title;
+            title.Format("Looking for %s.pdb", m_Module.GetString());
+            d.m_pOFN->lpstrTitle = title;
             if (d.DoModal() == IDOK) {
                 dirs.Add(d.GetPathName());
             }
