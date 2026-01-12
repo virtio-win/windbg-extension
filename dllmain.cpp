@@ -1441,6 +1441,12 @@ private:
     }
 };
 
+class CDebugExtensionModule : public CDebugExtension
+{
+public:
+    CDebugExtensionModule(PDEBUG_CLIENT Client, LPCSTR Module) : CDebugExtension(Client, Module, "DUMMY") {}
+};
+
 class CDebugExtensionNet : public CDebugExtension
 {
 public:
@@ -1692,10 +1698,10 @@ protected:
 // CDebugExtensionNet static data
 CDebugExtensionNet::CStaticData CDebugExtensionNet::StaticData;
 
-class CDebugExtensionNt : public CDebugExtension
+class CDebugExtensionNt : public CDebugExtensionModule
 {
 public:
-    CDebugExtensionNt(PDEBUG_CLIENT Client) : CDebugExtension(Client, "nt", "DUMMY") {}
+    CDebugExtensionNt(PDEBUG_CLIENT Client) : CDebugExtensionModule(Client, "nt") {}
     // TODO: move templates to base class
     template <typename VALTYPE> bool GetValue(LPCSTR Name, VALTYPE& Val)
     {
