@@ -770,18 +770,18 @@ protected:
         cmd.Run();
     }
 
-    void CheckSymbols()
+    bool CheckSymbols()
     {
-        CheckSymbols(m_Module);
+        return CheckSymbols(m_Module);
     }
 
-    void CheckSymbols(LPCSTR Name)
+    bool CheckSymbols(LPCSTR Name)
     {
         ULONG index;
         m_Result = m_Symbols->GetModuleByModuleName(Name, 0, &index, NULL);
         if (m_Result != S_OK) {
             Output("module %s is not loaded\n", Name);
-            return;
+            return false;
         }
         // first round
         SYM_TYPE type = NumSymTypes;
@@ -793,23 +793,26 @@ protected:
             GetSymbolsState(index, Name, type);
         }
 
-        if (type != SymPdb) {
-            Output("Trying to locate symbols ... \n");
+        if (type == SymPdb) {
+            return true;
+        }
 
-            CStringArray additionalDirs;
-            FindPdb(Name, additionalDirs);
+        Output("Trying to locate symbols ... \n");
 
-            AppendSymbolPath(additionalDirs);
+        CStringArray additionalDirs;
+        FindPdb(Name, additionalDirs);
 
-            if (additionalDirs.GetCount()) {
+        AppendSymbolPath(additionalDirs);
+
+        if (additionalDirs.GetCount()) {
+            GetSymbolsState(index, Name, type);
+            if (type == SymDeferred) {
+                Output("Trying to load symbols ... \n");
+                TriggerSymbolLoading(Name);
                 GetSymbolsState(index, Name, type);
-                if (type == SymDeferred) {
-                    Output("Trying to load symbols ... \n");
-                    TriggerSymbolLoading(Name);
-                    GetSymbolsState(index, Name, type);
-                }
             }
         }
+        return type == SymPdb;
     }
 
     void QueryModuleVersion(ULONG Index)
