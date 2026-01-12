@@ -147,6 +147,7 @@
     <ClInclude Include="framework.h" />
     <ClInclude Include="names.h" />
     <ClInclude Include="pch.h" />
+    <ClInclude Include="utils.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="dllmain.cpp" />
