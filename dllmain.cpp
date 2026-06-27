@@ -250,10 +250,10 @@ protected:
     }
 };
 
-class CGetVirtioAdapters : public CExternalCommandParser
+class CGetNetkvmAdapters : public CExternalCommandParser
 {
 public:
-    CGetVirtioAdapters(PDEBUG_CLIENT Client) :
+    CGetNetkvmAdapters(PDEBUG_CLIENT Client) :
         CExternalCommandParser(Client, "!ndiskd.miniports") {}
     void Process(CPtrArray& Adapters)
     {
@@ -273,10 +273,10 @@ public:
     }
 };
 
-class CGetAdapterContext : public CExternalCommandParser
+class CGetNetkvmAdapterContext : public CExternalCommandParser
 {
 public:
-    CGetAdapterContext(PDEBUG_CLIENT Client, ULONGLONG Adapter) :
+    CGetNetkvmAdapterContext(PDEBUG_CLIENT Client, ULONGLONG Adapter) :
         CExternalCommandParser(Client, MakeCommand(Adapter)) {}
     void Process(ULONGLONG& Context)
     {
@@ -665,6 +665,9 @@ public:
     }
     void findpdb(LPCSTR TopDir)
     {
+        if (CheckSymbols()) {
+            return;
+        }
         CStringArray dirs;
         if (*TopDir) {
             dirs.Add(TopDir);
@@ -689,6 +692,7 @@ public:
             Output("  %s\n", found[i].GetString());
         }
         AppendSymbolPath(found);
+        CheckSymbols();
     }
     // this actually works like 'x' command
     // just returns the address as I64
@@ -704,7 +708,189 @@ public:
         }
         Output("received type %d(%s), value 0x%p\n", v.Type, Name<eDEBUG_VALUE_TYPE>(v.Type), (PVOID)v.I64);
     }
+    virtual void mp(PCSTR Args)
+    {
+        CPtrArray adapters;
+        ULONG nSelected = 0;
+        if (Args) {
+            nSelected = atoi(Args);
+        }
+        EnumerateAdapters(adapters);
+        Output("%d %s adapters\n", (int)adapters.GetCount(), m_Module.GetString());
+        if (!adapters.GetCount())
+            return;
+        CheckSymbols();
+        StaticData.Adapter = NULL;
+        if (nSelected >= adapters.GetCount()) {
+            nSelected = (ULONG)adapters.GetCount() - 1;
+        }
+        for (UINT i = 0; i < adapters.GetCount(); ++i) {
+            PVOID context = GetAdapterContext(i, adapters[i]);
+            if (context && i == nSelected) {
+                StaticData.Adapter = adapters[0];
+                Output("Adapter #%d selected\n", i);
+            }
+        }
+    }
+    void help()
+    {
+        verbose(m_Client, "--help");
+        Output("mp [index=0]        - find miniport and symbols in known places\n");
+        Output("query               - read miniport field\n");
+        Output("findpdb <directory> - recursive find and append to symbol path\n");
+        Output("hv                  - dump Hyper-V fields\n");
+        Output("cn                  - get computer name\n");
+        Output("kshared             - get kshared stuff\n");
+    }
+    struct CStaticData
+    {
+        PVOID Adapter = NULL;
+        EXCEPTION_RECORD ExcRecords[4];
+    };
+    static CStaticData StaticData;
+    void query(PCSTR Args)
+    {
+        CStringArray params;
+        ULONG size = 0;
+
+        Tokenize(Args, " ", params, [](CString& Next) { return true; });
+        if (params.GetCount() < 2) {
+            Output("!virtio.query <option> <field of %s> [n],.field.field,.*,.! applicable\n", m_MainContext);
+            Output("Options:               \n");
+            Output("   e    evaluate as is\n");
+            Output("   g    read global variable\n");
+            Output("   t    traverse from type to fields\n");
+            Output("   ts   read as timestamp (system time)\n");
+            Output("   d    read as dword or less\n");
+            Output("   p    read as pointer\n");
+            Output("   s    get size, offset, type\n");
+            Output("   a    get size, offset, type then read\n");
+            Output("   l    {path to root entry} - dump list\n");
+            Output("   k    {kd data index} [size] - ReadDebuggerData\n");
+            return;
+        }
+
+        if (!params[0].CompareNoCase("k")) {
+            ULONG index = atoi(params[1]);
+            size = sizeof(ULONG64);
+            if (params.GetCount() > 2) {
+                size = atoi(params[2]);
+                if (size == 0 || size > sizeof(ULONG64)) {
+                    size = sizeof(ULONG64);
+                }
+            }
+            ULONG64 val = 0;
+            m_Result = m_DataSpaces->ReadDebuggerData(index, &val, size, NULL);
+            if (SUCCEEDED(m_Result)) {
+                Output("Data[%d] = %p\n", index, val);
+            }
+            else {
+                Output("ReadDebuggerData error %X\n", m_Result);
+            }
+            return;
+        }
+
+        if (!StaticData.Adapter && params[0].FindOneOf("sadp") >= 0) {
+            Output("Adapter not selected, trying 'mp' first\n");
+            mp(0);
+            if (!StaticData.Adapter) {
+                Output("Adapter context required for this command\n");
+                return;
+            }
+        }
+
+        CStringArray names;
+        CFieldInfo base;
+        if (params[1].Find('.') > 0) {
+            Tokenize(params[1], ".", names, [](CString& Next) { return true; });
+        }
+        else {
+            names.Add(params[1]);
+        }
+
+        if (!params[0].CompareNoCase("e")) {
+            Evaluate(params[1]);
+            return;
+        }
+
+        if (!params[0].CompareNoCase("s") || !params[0].CompareNoCase("a") || !params[0].CompareNoCase("ts")) {
+            CFieldParser parser;
+            CFieldInfo& f = parser.Info();
+            names.InsertAt(0, m_MainContext);
+            QueryStruct(m_MainContext, base, (ULONG64)StaticData.Adapter);
+            TraverseToField(base, names, parser);
+            LARGE_INTEGER val = {};
+            switch (tolower(params[0].GetAt(0)))
+            {
+            case 's':
+                return;
+            case 't':
+                if (f.Size() == sizeof(val)) {
+                    ReadMemory(f.Offset(), &val, f.Size(), NULL);
+                    LARGE_INTEGER crashTime = CrashTime();
+                    val.QuadPart -= crashTime.QuadPart;
+                    val.QuadPart = val.QuadPart / 10000;
+                    Output("%s = crash time %+d ms\n", f.Name(), val.LowPart);
+                    break;
+                }
+                // fallback to 'auto' if the size is not suitable
+            case 'a':
+                if (!f.IsReal() || f.Size() > 8)
+                    break;
+                ReadMemory(f.Offset(), &val, f.Size(), NULL);
+                if (f.Size() > 4) {
+                    Output("%s = 0x%p\n", f.Name(), (PVOID)val.QuadPart);
+                }
+                else {
+                    Output("%s = 0x%x(%d)\n", f.Name(), val.LowPart, val.LowPart);
+                }
+                break;
+            default:
+                break;
+            }
+            return;
+        }
+
+        if (!params[0].CompareNoCase("l")) {
+            CListParser parser(m_Control3);
+            names.InsertAt(0, m_MainContext);
+            QueryStruct(m_MainContext, base, (ULONG64)StaticData.Adapter);
+            TraverseToField(base, names, parser);
+        }
+
+        if (!params[0].CompareNoCase("d") || (size && size <= sizeof(ULONG))) {
+            ULONG val = 0;
+            GetAdapterField(StaticData.Adapter, params[1], val);
+            Output("%s = %d(%X)\n", params[1].GetString(), val, val);
+            return;
+        }
+
+        if (!params[0].CompareNoCase("p") || size == sizeof(PVOID)) {
+            PVOID p = nullptr;
+            GetAdapterField(StaticData.Adapter, params[1], p);
+            Output("%s = %p\n", params[1].GetString(), p);
+            return;
+        }
+
+        if (!params[0].CompareNoCase("g") && ResolveSymbol(names[0], base)) {
+            TraverseToField(base, names);
+        }
+
+        if (!params[0].CompareNoCase("t") && QueryStruct(names[0], base)) {
+            TraverseToField(base, names);
+        }
+
+        if (size) {
+            PVOID p = malloc(size);
+            if (GetAdapterField(StaticData.Adapter, params[1], p, size)) {
+
+            }
+            free(p);
+        }
+    }
 protected:
+    virtual void EnumerateAdapters(CPtrArray& Adapters) = 0;
+    virtual PVOID GetAdapterContext(UINT Index, PVOID Adapter) = 0;
     CDebugExtension(PDEBUG_CLIENT Client, LPCSTR Module, LPCSTR MainContext)
     {
         LOG("%s %s", __FUNCTION__, Module);
@@ -756,19 +942,12 @@ protected:
             #undef chkptr
         }
     }
-    void help()
-    {
-        verbose(m_Client, "--help");
-        Output("findpdb <directory> - recursive find and append to symbol path\n");
-        Output("hv                  - dump Hyper-V fields\n");
-        Output("cn                  - get computer name\n");
-        Output("kshared             - get kshared stuff\n");
-    }
-
     void TriggerSymbolLoading(LPCSTR ModuleName)
     {
         CString command;
-        command.Format("x %s!_any_symbol_just_to_trigger_pdb_loading", ModuleName);
+        //command.Format("x %s!_any_symbol_just_to_trigger_pdb_loading", ModuleName);
+        LOG("%s %s", __FUNCTION__, ModuleName);
+        command.Format(".reload /f %s.sys", ModuleName);
         CExternalCommandParser cmd(m_Client, command);
         cmd.Run();
     }
@@ -1231,7 +1410,6 @@ protected:
         ReadMemory(KI_USER_SHARED_DATA + 0x20, &li, size, &size);
         return li;
     }
-
 protected:
     CComPtr<IDebugControl> m_Control;
     CComPtr<IDebugClient>  m_Client;
@@ -1411,6 +1589,44 @@ protected:
 
         return true;
     }
+    static ULONG FilterException(PEXCEPTION_RECORD ERec)
+    {
+        RtlZeroMemory(&StaticData.ExcRecords, sizeof(StaticData.ExcRecords));
+        for (int i = 0; i < RTL_NUMBER_OF(StaticData.ExcRecords); ++i) {
+            StaticData.ExcRecords[i] = *ERec;
+            if (!ERec->ExceptionRecord) break;
+            ERec = ERec->ExceptionRecord;
+        }
+        return EXCEPTION_EXECUTE_HANDLER;
+    }
+    bool GetAdapterField(PVOID Context, LPCSTR Name, PVOID& Value)
+    {
+        return GetAdapterField(Context, Name, &Value, sizeof(Value));
+    }
+    bool GetAdapterField(PVOID Context, LPCSTR Name, ULONG& Value)
+    {
+        return GetAdapterField(Context, Name, &Value, sizeof(Value));
+    }
+    bool GetAdapterField(PVOID Context, LPCSTR FieldName, PVOID Buffer, ULONG Length)
+    {
+        LOG("Getting (%p)->%s", Context, FieldName);
+        ULONG res;
+        GetAdapterDataSafe(Context, FieldName, Buffer, Length, res);
+        LOG("result: %X", res);
+        if (res) {
+            Output("  error %X(%s)\n", res, Name<eSYMBOL_ERROR>(res));
+        }
+        return !res;
+    }
+    void GetAdapterDataSafe(PVOID Context, LPCSTR FieldName, PVOID Buffer, ULONG Length, ULONG& Result)
+    {
+        __try {
+            GetDataFromContextField(Context, FieldName, Buffer, Length, Result);
+        }
+        __except (FilterException(GetExceptionInformation()->ExceptionRecord)) {
+            Result = GetExceptionCode();
+        }
+    }
 private:
     static CString TimeStampToString(ULONG TimeDateStamp)
     {
@@ -1447,259 +1663,41 @@ private:
 class CDebugExtensionModule : public CDebugExtension
 {
 public:
-    CDebugExtensionModule(PDEBUG_CLIENT Client, LPCSTR Module) : CDebugExtension(Client, Module, "DUMMY") {}
+    CDebugExtensionModule(PDEBUG_CLIENT Client, LPCSTR Module, LPCSTR MainContext = "DUMMY") : CDebugExtension(Client, Module, MainContext) {}
 };
 
-class CDebugExtensionNet : public CDebugExtension
+class CDebugExtensionNet : public CDebugExtensionModule
 {
 public:
-    CDebugExtensionNet(PDEBUG_CLIENT Client) : CDebugExtension(Client, "netkvm", "PARANDIS_ADAPTER") {}
-    void mp()
+    CDebugExtensionNet(PDEBUG_CLIENT Client) : CDebugExtensionModule(Client, "netkvm", "PARANDIS_ADAPTER") {}
+    void EnumerateAdapters(CPtrArray& Adapters) override
     {
-        CPtrArray adapters;
+        CGetNetkvmAdapters cmd(m_Client);
+        cmd.Run();
+        cmd.Process(Adapters);
+    }
+    PVOID GetAdapterContext(UINT Index, PVOID Adapter) override
+    {
         CString version = "Unknown";
-        {
-            CGetVirtioAdapters cmd(m_Client);
-            cmd.Run();
-            cmd.Process(adapters);
-        }
-        Output("%d virtio network adapters\n", (int)adapters.GetCount());
-        if (!adapters.GetCount())
-            return;
-        for (int i = 0; i < adapters.GetCount(); ++i) {
-            ULONGLONG context = 0;
-            Output("#%d: adapter %I64X", i, (ULONGLONG)adapters[i]);
-            {
-                CGetAdapterContext cmd(m_Client, (ULONGLONG)adapters[i]);
-                cmd.Run();
-                cmd.Process(context);
-                cmd.Process(version);
-            }
-            adapters.ElementAt(i) = (PVOID)context;
-            if (context) {
-                Output(", context %I64X, version %s\n", (ULONGLONG)adapters[i], version.GetString());
-            }
-            else {
-                Output(", context unknown\n");
-            }
-        }
-        CheckSymbols();
-        for (int i = 0; i < adapters.GetCount(); ++i) {
+        ULONGLONG context = 0;
+        Output("#%d: adapter %p", Index, Adapter);
+        CGetNetkvmAdapterContext cmd(m_Client, (ULONGLONG)Adapter);
+        cmd.Run();
+        cmd.Process(context);
+        cmd.Process(version);
+        if (context) {
+            Output(", context %I64X, version %s\n", context, version.GetString());
             ULONG nQueues = 0;
-            if (GetAdapterField(adapters[i], "nPathBundles", nQueues)) {
-                Output("#%d: %d queues\n", i, nQueues);
-                if (adapters.GetCount() == 1) {
-                    StaticData.Adapter = adapters[0];
-                    Output("Adapter #%d selected\n", i);
-                }
+            if (GetAdapterField((PVOID)context, "nPathBundles", nQueues)) {
+                Output("#%d: %d queues\n", Index, nQueues);
             }
         }
+        return (PVOID)context;
     }
-
-    void query(PCSTR Args)
-    {
-        struct
-        {
-            PCSTR alias;
-            PCSTR field;
-        } aliases[] =
-        {
-            { "queues", "nPathBundles" },
-            { "tx0", "pPathBundles[0].txPath" },
-            { "tx1", "pPathBundles[1].txPath" },
-            { "tx2", "pPathBundles[2].txPath" },
-            { "tx3", "pPathBundles[3].txPath" },
-        };
-        CStringArray params;
-        ULONG size = 0;
-
-        Tokenize(Args, " ", params, [](CString& Next) { return true; });
-        if (params.GetCount() < 2) {
-            Output("!virtio.query <option> <field of %s or global variable>\n", m_MainContext);
-            Output("Options:\n");
-            Output("   e    evaluate as is\n");
-            Output("   g    read global variable\n");
-            Output("   t    traverse from type to fields\n");
-            Output("   ts   read as timestamp (system time)\n");
-            Output("   d    read as dword or less\n");
-            Output("   p    read as pointer\n");
-            Output("   s    get size, offset, type\n");
-            Output("   a    get size, offset, type then read\n");
-            Output("   l    {path to root entry} - dump list\n");
-            Output("   k    {kd data index} [size] - ReadDebuggerData\n");
-            return;
-        }
-
-        if (!params[0].CompareNoCase("k")) {
-            ULONG index = atoi(params[1]);
-            size = sizeof(ULONG64);
-            if (params.GetCount() > 2) {
-                size = atoi(params[2]);
-                if (size == 0 || size > sizeof(ULONG64)) {
-                    size = sizeof(ULONG64);
-                }
-            }
-            ULONG64 val = 0;
-            m_Result = m_DataSpaces->ReadDebuggerData(index, &val, size, NULL);
-            if (SUCCEEDED(m_Result)) {
-                Output("Data[%d] = %p\n", index, val);
-            } else {
-                Output("ReadDebuggerData error %X\n", m_Result);
-            }
-            return;
-        }
-
-        if (!StaticData.Adapter && params[0].FindOneOf("sadp") >= 0) {
-            Output("Adapter not selected, trying 'mp' first\n");
-            mp();
-            if (!StaticData.Adapter) {
-                Output("Adapter context required for this command\n");
-                return;
-            }
-        }
-
-        CStringArray names;
-        CFieldInfo base;
-        if (params[1].Find('.') > 0) {
-            Tokenize(params[1], ".", names, [](CString& Next) { return true; });
-        } else {
-            names.Add(params[1]);
-        }
-
-        if (!params[0].CompareNoCase("e")) {
-            Evaluate(params[1]);
-            return;
-        }
-
-        if (!params[0].CompareNoCase("s") || !params[0].CompareNoCase("a") || !params[0].CompareNoCase("ts")) {
-            CFieldParser parser;
-            CFieldInfo& f = parser.Info();
-            names.InsertAt(0, m_MainContext);
-            QueryStruct(m_MainContext, base, (ULONG64)StaticData.Adapter);
-            TraverseToField(base, names, parser);
-            LARGE_INTEGER val = {};
-            switch (tolower(params[0].GetAt(0)))
-            {
-                case 's':
-                    return;
-                case 't':
-                    if (f.Size() == sizeof(val)) {
-                        ReadMemory(f.Offset(), &val, f.Size(), NULL);
-                        LARGE_INTEGER crashTime = CrashTime();
-                        val.QuadPart -= crashTime.QuadPart;
-                        val.QuadPart = val.QuadPart / 10000;
-                        Output("%s = crash time %+d ms\n", f.Name(), val.LowPart);
-                        break;
-                    }
-                    // fallback to 'auto' if the size is not suitable
-                case 'a':
-                    if (!f.IsReal() || f.Size() > 8)
-                        break;
-                    ReadMemory(f.Offset(), &val, f.Size(), NULL);
-                    if (f.Size() > 4) {
-                        Output("%s = 0x%p\n", f.Name(), (PVOID)val.QuadPart);
-                    } else {
-                        Output("%s = 0x%x(%d)\n", f.Name(), val.LowPart, val.LowPart);
-                    }
-                    break;
-                default:
-                    break;
-            }
-            return;
-        }
-
-        if (!params[0].CompareNoCase("l")) {
-            CListParser parser(m_Control3);
-            names.InsertAt(0, m_MainContext);
-            QueryStruct(m_MainContext, base, (ULONG64)StaticData.Adapter);
-            TraverseToField(base, names, parser);
-        }
-
-        if (!params[0].CompareNoCase("d") || (size && size <= sizeof(ULONG))) {
-            ULONG val = 0;
-            GetAdapterField(StaticData.Adapter, params[1], val);
-            Output("%s = %d(%X)\n", params[1].GetString(), val, val);
-            return;
-        }
-
-        if (!params[0].CompareNoCase("p") || size == sizeof(PVOID)) {
-            PVOID p = nullptr;
-            GetAdapterField(StaticData.Adapter, params[1], p);
-            Output("%s = %p\n", params[1].GetString(), p);
-            return;
-        }
-
-        if (!params[0].CompareNoCase("g") && ResolveSymbol(names[0], base)) {
-            TraverseToField(base, names);
-        }
-
-        if (!params[0].CompareNoCase("t") && QueryStruct(names[0], base)) {
-            TraverseToField(base, names);
-        }
-
-        if (size) {
-            PVOID p = malloc(size);
-            if (GetAdapterField(StaticData.Adapter, params[1], p, size)) {
-
-            }
-            free(p);
-        }
-    }
-    void help()
-    {
-        __super::help();
-        Output("mp                  - find miniport and symbols in known places\n");
-        Output("query               - read miniport field\n");
-    }
-    struct CStaticData
-    {
-        PVOID Adapter = NULL;
-        EXCEPTION_RECORD ExcRecords[4];
-    };
-protected:
-    bool GetAdapterField(PVOID Context, LPCSTR Name, PVOID& Value)
-    {
-        return GetAdapterField(Context, Name, &Value, sizeof(Value));
-    }
-    bool GetAdapterField(PVOID Context, LPCSTR Name, ULONG& Value)
-    {
-        return GetAdapterField(Context, Name, &Value, sizeof(Value));
-    }
-    bool GetAdapterField(PVOID Context, LPCSTR FieldName, PVOID Buffer, ULONG Length)
-    {
-        LOG("Getting (%p)->%s", Context, FieldName);
-        ULONG res;
-        GetAdapterDataSafe(Context, FieldName, Buffer, Length, res);
-        LOG("result: %X", res);
-        if (res) {
-            Output("  error %X(%s)\n", res, Name<eSYMBOL_ERROR>(res));
-        }
-        return !res;
-    }
-    void GetAdapterDataSafe(PVOID Context, LPCSTR FieldName, PVOID Buffer, ULONG Length, ULONG& Result)
-    {
-        __try {
-            GetDataFromContextField(Context, FieldName, Buffer, Length, Result);
-        }
-        __except (FilterException(GetExceptionInformation()->ExceptionRecord)) {
-            Result = GetExceptionCode();
-        }
-    }
-    static ULONG FilterException(PEXCEPTION_RECORD ERec)
-    {
-        RtlZeroMemory(&StaticData.ExcRecords, sizeof(StaticData.ExcRecords));
-        for (int i = 0; i < RTL_NUMBER_OF(StaticData.ExcRecords); ++i) {
-            StaticData.ExcRecords[i] = *ERec;
-            if (!ERec->ExceptionRecord) break;
-            ERec = ERec->ExceptionRecord;
-        }
-        return EXCEPTION_EXECUTE_HANDLER;
-    }
-    static CStaticData StaticData;
 };
 
-// CDebugExtensionNet static data
-CDebugExtensionNet::CStaticData CDebugExtensionNet::StaticData;
+// CDebugExtension static data, common for all
+CDebugExtension::CStaticData CDebugExtension::StaticData;
 
 class CDebugExtensionNt : public CDebugExtensionModule
 {
@@ -1755,6 +1753,9 @@ public:
         Output("%d.%d.%d %d:%d:%d.%03d ", st.wDay, st.wMonth, st.wYear, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
         Output("TZ bias %I64d, %d hours\n", tz.QuadPart, tzHours);
     }
+protected:
+    void EnumerateAdapters(CPtrArray& Adapters) override {}
+    PVOID GetAdapterContext(UINT Index, PVOID Adapter) override { return NULL; }
 };
 
 extern "C" __declspec(dllexport) HRESULT help(IN PDEBUG_CLIENT Client, IN PCSTR Args)
@@ -1770,7 +1771,7 @@ extern "C" __declspec(dllexport) HRESULT mp(IN PDEBUG_CLIENT Client, IN PCSTR Ar
 {
     VERBOSE("%s: =>", __FUNCTION__);
     CDebugExtensionNet e(Client);
-    e.mp();
+    e.mp(Args);
     VERBOSE("%s: <=", __FUNCTION__);
     return S_OK;
 }
