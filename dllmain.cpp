@@ -7,6 +7,8 @@
 //#define THIS_IS_WINDBG_EXTENSION
 WINDBG_EXTENSION_APIS ExtensionApis;
 
+CString DriverModule = "netkvm";
+
 bool bVerbose;
 
 extern "C" __declspec(dllexport) HRESULT verbose(IN PDEBUG_CLIENT Client, IN PCSTR Args)
@@ -708,11 +710,11 @@ public:
         }
         Output("received type %d(%s), value 0x%p\n", v.Type, Name<eDEBUG_VALUE_TYPE>(v.Type), (PVOID)v.I64);
     }
-    virtual void mp(PCSTR Args)
+    virtual void mp(PCSTR Args = NULL)
     {
         CPtrArray adapters;
         ULONG nSelected = 0;
-        if (Args) {
+        if (Args && !Args) {
             nSelected = atoi(Args);
         }
         EnumerateAdapters(adapters);
@@ -732,7 +734,7 @@ public:
             }
         }
     }
-    void help()
+    virtual void help()
     {
         verbose(m_Client, "--help");
         Output("mp [index=0]        - find miniport and symbols in known places\n");
@@ -792,7 +794,7 @@ public:
 
         if (!StaticData.Adapter && params[0].FindOneOf("sadp") >= 0) {
             Output("Adapter not selected, trying 'mp' first\n");
-            mp(0);
+            mp();
             if (!StaticData.Adapter) {
                 Output("Adapter context required for this command\n");
                 return;
@@ -1670,6 +1672,7 @@ class CDebugExtensionNet : public CDebugExtensionModule
 {
 public:
     CDebugExtensionNet(PDEBUG_CLIENT Client) : CDebugExtensionModule(Client, "netkvm", "PARANDIS_ADAPTER") {}
+protected:
     void EnumerateAdapters(CPtrArray& Adapters) override
     {
         CGetNetkvmAdapters cmd(m_Client);
@@ -1698,6 +1701,51 @@ public:
 
 // CDebugExtension static data, common for all
 CDebugExtension::CStaticData CDebugExtension::StaticData;
+
+class CDebugExtensionCreator : public CDebugExtensionModule
+{
+public:
+    CDebugExtensionCreator(LPCSTR Driver, PDEBUG_CLIENT Client) :
+        m_DriverName(Driver),
+        CDebugExtensionModule(Client, "")
+    {
+        if (Driver == NULL || *Driver == 0) {
+            Output("Current driver is %s\n", DriverModule.GetString());
+            return;
+        }
+        CString s = Driver;
+        if (!s.CompareNoCase("netkvm")) {
+            m_Ext = new CDebugExtensionNet(Client);
+        } else if (!s.CompareNoCase("viostor")) {
+            //return new CDebugExtensionStor(Client);
+        } else if (!s.CompareNoCase("vioscsi")) {
+            //return new CDebugExtensionScsi(Client);
+        }
+        if (m_Ext) {
+            StaticData.Adapter = NULL;
+        } else {
+            Output("Driver %s is not supported\n", Driver);
+        }
+    }
+    void Update()
+    {
+        DriverModule = m_DriverName;
+    }
+    ~CDebugExtensionCreator()
+    {
+        if (m_Ext) {
+            delete m_Ext;
+        }
+    }
+    CDebugExtensionModule* Obj() { return m_Ext; }
+protected:
+    void EnumerateAdapters(CPtrArray& Adapters) override {}
+    PVOID GetAdapterContext(UINT Index, PVOID Adapter) override { return NULL; }
+private:
+    CDebugExtensionModule* m_Ext = NULL;
+    void mp(LPCSTR Args) override {}
+    CString m_DriverName;
+};
 
 class CDebugExtensionNt : public CDebugExtensionModule
 {
@@ -1761,8 +1809,10 @@ protected:
 extern "C" __declspec(dllexport) HRESULT help(IN PDEBUG_CLIENT Client, IN PCSTR Args)
 {
     VERBOSE("%s: =>", __FUNCTION__);
-    CDebugExtensionNet e(Client);
-    e.help();
+    CDebugExtensionCreator e(DriverModule, Client);
+    if (e.Obj()) {
+        e.Obj()->help();
+    }
     VERBOSE("%s: <=", __FUNCTION__);
     return S_OK;
 }
@@ -1770,8 +1820,10 @@ extern "C" __declspec(dllexport) HRESULT help(IN PDEBUG_CLIENT Client, IN PCSTR 
 extern "C" __declspec(dllexport) HRESULT mp(IN PDEBUG_CLIENT Client, IN PCSTR Args)
 {
     VERBOSE("%s: =>", __FUNCTION__);
-    CDebugExtensionNet e(Client);
-    e.mp(Args);
+    CDebugExtensionCreator e(DriverModule, Client);
+    if (e.Obj()) {
+        e.Obj()->mp(Args);
+    }
     VERBOSE("%s: <=", __FUNCTION__);
     return S_OK;
 }
@@ -1788,8 +1840,10 @@ extern "C" __declspec(dllexport) HRESULT test(IN PDEBUG_CLIENT Client, IN PCSTR 
 extern "C" __declspec(dllexport) HRESULT findpdb(IN PDEBUG_CLIENT Client, IN PCSTR Args)
 {
     VERBOSE("%s: =>", __FUNCTION__);
-    CDebugExtensionNet e(Client);
-    e.findpdb(Args);
+    CDebugExtensionCreator e(DriverModule, Client);
+    if (e.Obj()) {
+        e.Obj()->findpdb(Args);
+    }
     VERBOSE("%s: <=", __FUNCTION__);
     return S_OK;
 }
@@ -1797,8 +1851,10 @@ extern "C" __declspec(dllexport) HRESULT findpdb(IN PDEBUG_CLIENT Client, IN PCS
 extern "C" __declspec(dllexport) HRESULT query(IN PDEBUG_CLIENT Client, IN PCSTR Args)
 {
     VERBOSE("%s: =>", __FUNCTION__);
-    CDebugExtensionNet e(Client);
-    e.query(Args);
+    CDebugExtensionCreator e(DriverModule, Client);
+    if (e.Obj()) {
+        e.Obj()->query(Args);
+    }
     VERBOSE("%s: <=", __FUNCTION__);
     return S_OK;
 }
@@ -1825,6 +1881,17 @@ extern "C" __declspec(dllexport) HRESULT kshared(IN PDEBUG_CLIENT Client, IN PCS
     VERBOSE("%s: =>", __FUNCTION__);
     CDebugExtensionNt e(Client);
     e.DumpKShared();
+    return S_OK;
+}
+
+extern "C" __declspec(dllexport) HRESULT driver(IN PDEBUG_CLIENT Client, IN PCSTR Args)
+{
+    VERBOSE("%s: =>", __FUNCTION__);
+    CDebugExtensionCreator e(Args, Client);
+    if (e.Obj()) {
+        e.Update();
+        e.Obj()->mp();
+    }
     return S_OK;
 }
 
