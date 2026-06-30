@@ -299,6 +299,88 @@ public:
     }
 };
 
+class CGetStorageAdapters : public CExternalCommandParser
+{
+public:
+    CGetStorageAdapters(PDEBUG_CLIENT Client, LPCSTR DriverName) :
+        CExternalCommandParser(Client, "!storagekd.storadapter"),
+        m_DriverName(DriverName) {}
+    void Process(CPtrArray& Adapters)
+    {
+        CString output;
+        CString marker = "\\driver\\";
+        marker += m_DriverName;
+        marker.MakeLower();
+        CombineOutput(output, true);
+        output.MakeLower();
+        int pos = 0;
+        do
+        {
+            int pos = output.Find(marker);
+            if (pos < 0) {
+                break;
+            }
+            output.Delete(0, pos);
+            output.Delete(0, marker.GetLength());
+            pos = output.Find("\\");
+            CString sAdapter;
+            if (pos < 0) {
+                sAdapter = output;
+                output.Empty();
+            } else {
+                sAdapter = output.Left(pos);
+                output.Delete(0, pos);
+            }
+            sAdapter.TrimLeft();
+            // get adapter and add it
+            VERBOSE("got adapter %s\n", sAdapter.GetString());
+            char* endptr;
+            void* p = (void*)strtoull(sAdapter, &endptr, 16);
+            if (p) {
+                Adapters.Add(p);
+            }
+        } while (true);
+    }
+private:
+    LPCSTR m_DriverName;
+};
+
+class CGetStorageAdapterContext : public CExternalCommandParser
+{
+public:
+    CGetStorageAdapterContext(PDEBUG_CLIENT Client, PVOID Adapter) :
+        CExternalCommandParser(Client, MakeCommand(Adapter)) {}
+    void Process(PVOID& MainContext, PVOID& RaidContext)
+    {
+        CString output;
+        CombineOutput(output, true);
+        GetPointer(output, "HwDeviceExt:", MainContext);
+        GetPointer(output, "AdapterExt:", RaidContext);
+    }
+private:
+    static void GetPointer(const CString& Text, LPCSTR Prefix, PVOID& Ptr)
+    {
+        CString s = Text;
+        int pos = s.Find(Prefix);
+        if (pos < 0) {
+            return;
+        }
+        s.Delete(0, pos + (int)strlen(Prefix));
+        s.TrimLeft();
+        char* endptr;
+        void* p = (void*)strtoull(s, &endptr, 16);
+        if (p) {
+            Ptr = p;
+        }
+    }
+    static CString MakeCommand(PVOID Adapter)
+    {
+        CString s;
+        s.Format("!storagekd.storadapter %p", Adapter);
+        return s;
+    }
+};
+
 class CGetNetkvmAdapterContext : public CExternalCommandParser
 {
 public:
@@ -746,14 +828,16 @@ public:
         if (!adapters.GetCount())
             return;
         CheckSymbols();
-        StaticData.Adapter = NULL;
+        StaticData.AdapterContext = StaticData.RaidContext = NULL;
         if (nSelected >= adapters.GetCount()) {
             nSelected = (ULONG)adapters.GetCount() - 1;
         }
         for (UINT i = 0; i < adapters.GetCount(); ++i) {
-            PVOID context = GetAdapterContext(i, adapters[i]);
-            if (context && i == nSelected) {
-                StaticData.Adapter = adapters[0];
+            PVOID mainContext, RaidContext = NULL;
+            mainContext = GetAdapterContext(i, adapters[i], RaidContext);
+            if (mainContext && i == nSelected) {
+                StaticData.AdapterContext = adapters[0];
+                StaticData.RaidContext = RaidContext;
                 Output("Adapter #%d selected\n", i);
             }
         }
@@ -770,7 +854,8 @@ public:
     }
     struct CStaticData
     {
-        PVOID Adapter = NULL;
+        PVOID AdapterContext = NULL;
+        PVOID RaidContext = NULL;
         EXCEPTION_RECORD ExcRecords[4];
     };
     static CStaticData StaticData;
@@ -816,10 +901,10 @@ public:
             return;
         }
 
-        if (!StaticData.Adapter && params[0].FindOneOf("sadp") >= 0) {
+        if (!StaticData.AdapterContext && params[0].FindOneOf("sadp") >= 0) {
             Output("Adapter not selected, trying 'mp' first\n");
             mp();
-            if (!StaticData.Adapter) {
+            if (!StaticData.AdapterContext) {
                 Output("Adapter context required for this command\n");
                 return;
             }
@@ -843,7 +928,7 @@ public:
             CFieldParser parser;
             CFieldInfo& f = parser.Info();
             names.InsertAt(0, m_MainContext);
-            QueryStruct(m_MainContext, base, (ULONG64)StaticData.Adapter);
+            QueryStruct(m_MainContext, base, (ULONG64)StaticData.AdapterContext);
             TraverseToField(base, names, parser);
             LARGE_INTEGER val = {};
             switch (tolower(params[0].GetAt(0)))
@@ -880,20 +965,20 @@ public:
         if (!params[0].CompareNoCase("l")) {
             CListParser parser(m_Control3);
             names.InsertAt(0, m_MainContext);
-            QueryStruct(m_MainContext, base, (ULONG64)StaticData.Adapter);
+            QueryStruct(m_MainContext, base, (ULONG64)StaticData.AdapterContext);
             TraverseToField(base, names, parser);
         }
 
         if (!params[0].CompareNoCase("d") || (size && size <= sizeof(ULONG))) {
             ULONG val = 0;
-            GetAdapterField(StaticData.Adapter, params[1], val);
+            GetAdapterField(StaticData.AdapterContext, params[1], val);
             Output("%s = %d(%X)\n", params[1].GetString(), val, val);
             return;
         }
 
         if (!params[0].CompareNoCase("p") || size == sizeof(PVOID)) {
             PVOID p = nullptr;
-            GetAdapterField(StaticData.Adapter, params[1], p);
+            GetAdapterField(StaticData.AdapterContext, params[1], p);
             Output("%s = %p\n", params[1].GetString(), p);
             return;
         }
@@ -908,7 +993,7 @@ public:
 
         if (size) {
             PVOID p = malloc(size);
-            if (GetAdapterField(StaticData.Adapter, params[1], p, size)) {
+            if (GetAdapterField(StaticData.AdapterContext, params[1], p, size)) {
 
             }
             free(p);
@@ -1708,6 +1793,41 @@ protected:
     }
 };
 
+class CDebugExtensionStorage : public CDebugExtensionModule
+{
+public:
+    CDebugExtensionStorage(PDEBUG_CLIENT Client, LPCSTR Name, LPCSTR Context = "_ADAPTER_EXTENSION") : CDebugExtensionModule(Client, Name, Context) {}
+protected:
+    void EnumerateAdapters(CPtrArray& Adapters) override
+    {
+        CGetStorageAdapters cmd(m_Client, m_Module);
+        cmd.Run();
+        cmd.Process(Adapters);
+    }
+    PVOID GetAdapterContext(UINT Index, PVOID Adapter, PVOID& RaidContext) override
+    {
+        CGetStorageAdapterContext cmd(m_Client, Adapter);
+        cmd.Run();
+        Output("#%d: adapter %p", Index, Adapter);
+        PVOID mainContext = NULL;
+        cmd.Process(mainContext, RaidContext);
+        Output(", context %p, RAID context %p\n", mainContext, RaidContext);
+        return mainContext;
+    }
+};
+
+class CDebugExtensionViostor : public CDebugExtensionStorage
+{
+public:
+    CDebugExtensionViostor(PDEBUG_CLIENT Client) : CDebugExtensionStorage(Client, "viostor") {}
+};
+
+class CDebugExtensionVioscsi : public CDebugExtensionStorage
+{
+public:
+    CDebugExtensionVioscsi(PDEBUG_CLIENT Client) : CDebugExtensionStorage(Client, "vioscsi") {}
+};
+
 // CDebugExtension static data, common for all
 CDebugExtension::CStaticData CDebugExtension::StaticData;
 
@@ -1726,12 +1846,12 @@ public:
         if (!s.CompareNoCase("netkvm")) {
             m_Ext = new CDebugExtensionNet(Client);
         } else if (!s.CompareNoCase("viostor")) {
-            //return new CDebugExtensionStor(Client);
+            m_Ext = new  CDebugExtensionViostor(Client);
         } else if (!s.CompareNoCase("vioscsi")) {
-            //return new CDebugExtensionScsi(Client);
+            m_Ext = new  CDebugExtensionVioscsi(Client);
         }
         if (m_Ext) {
-            StaticData.Adapter = NULL;
+            StaticData.AdapterContext = StaticData.RaidContext = NULL;
         } else {
             Output("Driver %s is not supported\n", Driver);
         }
