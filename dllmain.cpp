@@ -916,7 +916,7 @@ public:
     }
 protected:
     virtual void EnumerateAdapters(CPtrArray& Adapters) = 0;
-    virtual PVOID GetAdapterContext(UINT Index, PVOID Adapter) = 0;
+    virtual PVOID GetAdapterContext(UINT Index, PVOID Adapter, PVOID& RaidContext) = 0;
     CDebugExtension(PDEBUG_CLIENT Client, LPCSTR Module, LPCSTR MainContext) :
         CClient(Client)
     {
@@ -1688,7 +1688,7 @@ protected:
         cmd.Run();
         cmd.Process(Adapters);
     }
-    PVOID GetAdapterContext(UINT Index, PVOID Adapter) override
+    PVOID GetAdapterContext(UINT Index, PVOID Adapter, PVOID& RaidContext) override
     {
         CString version = "Unknown";
         ULONGLONG context = 0;
@@ -1749,7 +1749,7 @@ public:
     CDebugExtensionModule* Obj() { return m_Ext; }
 protected:
     void EnumerateAdapters(CPtrArray& Adapters) override {}
-    PVOID GetAdapterContext(UINT Index, PVOID Adapter) override { return NULL; }
+    PVOID GetAdapterContext(UINT Index, PVOID Adapter, PVOID& RaidContext) override { return NULL; }
 private:
     CDebugExtensionModule* m_Ext = NULL;
     void mp(LPCSTR Args) override {}
@@ -1812,7 +1812,7 @@ public:
     }
 protected:
     void EnumerateAdapters(CPtrArray& Adapters) override {}
-    PVOID GetAdapterContext(UINT Index, PVOID Adapter) override { return NULL; }
+    PVOID GetAdapterContext(UINT Index, PVOID Adapter, PVOID& RaidContext) override { return NULL; }
 };
 
 extern "C" __declspec(dllexport) HRESULT help(IN PDEBUG_CLIENT Client, IN PCSTR Args)
