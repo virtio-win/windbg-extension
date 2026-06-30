@@ -209,10 +209,13 @@ protected:
     CComPtr<IDebugControl> m_Control;
     CString m_Command;
     void BeVerbose() { m_Verbose = true; }
-    void CombineOutput(CString& Combined)
+    void CombineOutput(CString& Combined, bool Split = false)
     {
         for (int i = 0; i < m_Output.GetCount(); ++i) {
             Combined += m_Output[i];
+            if (Split) {
+                Combined += ' ';
+            }
         }
     }
     CStringArray m_Output;
