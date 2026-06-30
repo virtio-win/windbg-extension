@@ -11,14 +11,35 @@ CString DriverModule = "netkvm";
 
 bool bVerbose;
 
+class CClient
+{
+public:
+    CClient(IN PDEBUG_CLIENT Client)
+    {
+        m_Client = Client;
+        m_Result = m_Client.QueryInterface<IDebugControl>(&m_Control);
+        if (m_Result != S_OK) {
+            ERR("%s: Can't obtain IDebugControl", __FUNCTION__);
+            throw;
+        }
+    }
+    void Output(LPCSTR Format, ...)
+    {
+        va_list list;
+        va_start(list, Format);
+        m_Control->OutputVaList(DEBUG_OUTPUT_NORMAL, Format, list);
+        va_end(list);
+    }
+protected:
+    CComPtr<IDebugControl> m_Control;
+    CComPtr<IDebugClient>  m_Client;
+    HRESULT m_Result;
+};
+
 extern "C" __declspec(dllexport) HRESULT verbose(IN PDEBUG_CLIENT Client, IN PCSTR Args)
 {
-    CComPtr<IDebugClient> client = Client;
-    CComPtr<IDebugControl> control;
-    auto usage = [&]() { control->Output(DEBUG_OUTPUT_NORMAL, "verbose <on|off>    - enable/disable extended debug output to DbgView\n"); };
-    if (S_OK != client.QueryInterface<IDebugControl>(&control)) {
-        return S_FALSE;
-    }
+    CClient client(Client);
+    auto usage = [&]() { client.Output("verbose <on|off>    - enable/disable extended debug output to DbgView\n"); };
     if (!CString("on").Compare(Args)) {
         bVerbose = true;
     }
@@ -30,7 +51,7 @@ extern "C" __declspec(dllexport) HRESULT verbose(IN PDEBUG_CLIENT Client, IN PCS
         usage();
     }
     if (CString("--help").Compare(Args)) {
-        control->Output(DEBUG_OUTPUT_NORMAL, "verbose is %s\n", bVerbose ? "on" : "off");
+        client.Output("verbose is %s\n", bVerbose ? "on" : "off");
     }
     return S_OK;
 }
@@ -644,7 +665,7 @@ protected:
     CFieldInfo m_Info;
 };
 
-class CDebugExtension
+class CDebugExtension : public CClient
 {
 public:
     virtual ~CDebugExtension()
@@ -893,17 +914,12 @@ public:
 protected:
     virtual void EnumerateAdapters(CPtrArray& Adapters) = 0;
     virtual PVOID GetAdapterContext(UINT Index, PVOID Adapter) = 0;
-    CDebugExtension(PDEBUG_CLIENT Client, LPCSTR Module, LPCSTR MainContext)
+    CDebugExtension(PDEBUG_CLIENT Client, LPCSTR Module, LPCSTR MainContext) :
+        CClient(Client)
     {
         LOG("%s %s", __FUNCTION__, Module);
         m_Module = Module;
-        m_Client = Client;
         m_MainContext = MainContext;
-        m_Result = m_Client.QueryInterface<IDebugControl>(&m_Control);
-        if (m_Result != S_OK) {
-            ERR("%s: Can't obtain IDebugControl", __FUNCTION__);
-            throw;
-        }
         m_Result = m_Client.QueryInterface<IDebugSymbols>(&m_Symbols);
         if (m_Result != S_OK) {
             ERR("%s: Can't obtain IDebugSymbols", __FUNCTION__);
@@ -1160,13 +1176,6 @@ protected:
             Dirs.Add(symPath);
         }
     }
-    void Output(LPCSTR Format, ...)
-    {
-        va_list list;
-        va_start(list, Format);
-        m_Control->OutputVaList(DEBUG_OUTPUT_NORMAL, Format, list);
-        va_end(list);
-    }
     bool GetTypeName(ULONG64 ModuleBase, ULONG TypeId, CString& TypeName)
     {
         char buffer[1024];
@@ -1413,13 +1422,10 @@ protected:
         return li;
     }
 protected:
-    CComPtr<IDebugControl> m_Control;
-    CComPtr<IDebugClient>  m_Client;
     CComPtr<IDebugSymbols> m_Symbols;
     CComPtr<IDebugSymbols3> m_Symbols3;
     CComPtr<IDebugControl3> m_Control3;
     CComPtr<IDebugDataSpaces> m_DataSpaces;
-    HRESULT m_Result;
     CString m_Module;
     CString m_MainContext;
     bool HasEAPI() const { return ExtensionApis.nSize; }
