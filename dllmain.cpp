@@ -313,7 +313,6 @@ public:
         marker.MakeLower();
         CombineOutput(output, true);
         output.MakeLower();
-        int pos = 0;
         do
         {
             int pos = output.Find(marker);
@@ -322,20 +321,11 @@ public:
             }
             output.Delete(0, pos);
             output.Delete(0, marker.GetLength());
-            pos = output.Find("\\");
-            CString sAdapter;
-            if (pos < 0) {
-                sAdapter = output;
-                output.Empty();
-            } else {
-                sAdapter = output.Left(pos);
-                output.Delete(0, pos);
+            while (isblank(output[0])) {
+                output.Delete(0);
             }
-            sAdapter.TrimLeft();
-            // get adapter and add it
-            VERBOSE("got adapter %s\n", sAdapter.GetString());
             char* endptr;
-            void* p = (void*)strtoull(sAdapter, &endptr, 16);
+            void* p = (void*)strtoull(output, &endptr, 16);
             if (p) {
                 Adapters.Add(p);
             }
