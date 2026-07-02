@@ -853,10 +853,27 @@ public:
     {
         CStringArray params;
         ULONG size = 0;
-
+        PVOID deviceContext = StaticData.AdapterContext;
+        CString contextType = m_MainContext;
         Tokenize(Args, " ", params, [](CString& Next) { return true; });
+        if (params.GetCount() && !params[0].CompareNoCase("-r")) {
+            params.RemoveAt(0);
+            if (m_RaidContext.IsEmpty()) {
+                Output("This driver does not use RAID extension\n");
+                return;
+            }
+            if (!StaticData.RaidContext) {
+                Output("The device is not selected, use mp first\n");
+                return;
+            }
+            deviceContext = StaticData.RaidContext;
+            contextType = m_RaidContext;
+        }
         if (params.GetCount() < 2) {
-            Output("!virtio.query <option> <field of %s> [n],.field.field,.*,.! applicable\n", m_MainContext);
+            Output("!virtio.query %s <option> <field of %s> [n],.field.field,.*,.! applicable\n", m_RaidContext ? "[-r]" : "", m_MainContext);
+            if (m_RaidContext) {
+                Output("   -r   use storport RAID extension (%s) instead of ADAPTER extension\n", m_RaidContext);
+            }
             Output("Options:               \n");
             Output("   e    evaluate as is\n");
             Output("   g    read global variable\n");
@@ -891,10 +908,11 @@ public:
             return;
         }
 
-        if (!StaticData.AdapterContext && params[0].FindOneOf("sadp") >= 0) {
+        if (!deviceContext && params[0].FindOneOf("sadp") >= 0) {
             Output("Adapter not selected, trying 'mp' first\n");
             mp();
-            if (!StaticData.AdapterContext) {
+            deviceContext = StaticData.AdapterContext;
+            if (!deviceContext) {
                 Output("Adapter context required for this command\n");
                 return;
             }
@@ -917,8 +935,8 @@ public:
         if (!params[0].CompareNoCase("s") || !params[0].CompareNoCase("a") || !params[0].CompareNoCase("ts")) {
             CFieldParser parser;
             CFieldInfo& f = parser.Info();
-            names.InsertAt(0, m_MainContext);
-            QueryStruct(m_MainContext, base, (ULONG64)StaticData.AdapterContext);
+            names.InsertAt(0, contextType);
+            QueryStruct(contextType, base, (ULONG64)deviceContext);
             TraverseToField(base, names, parser);
             LARGE_INTEGER val = {};
             switch (tolower(params[0].GetAt(0)))
@@ -954,21 +972,21 @@ public:
 
         if (!params[0].CompareNoCase("l")) {
             CListParser parser(m_Control3);
-            names.InsertAt(0, m_MainContext);
-            QueryStruct(m_MainContext, base, (ULONG64)StaticData.AdapterContext);
+            names.InsertAt(0, contextType);
+            QueryStruct(contextType, base, (ULONG64)deviceContext);
             TraverseToField(base, names, parser);
         }
 
         if (!params[0].CompareNoCase("d") || (size && size <= sizeof(ULONG))) {
             ULONG val = 0;
-            GetAdapterField(StaticData.AdapterContext, params[1], val);
+            GetAdapterField(deviceContext, contextType, params[1], val);
             Output("%s = %d(%X)\n", params[1].GetString(), val, val);
             return;
         }
 
         if (!params[0].CompareNoCase("p") || size == sizeof(PVOID)) {
             PVOID p = nullptr;
-            GetAdapterField(StaticData.AdapterContext, params[1], p);
+            GetAdapterField(deviceContext, contextType, params[1], p);
             Output("%s = %p\n", params[1].GetString(), p);
             return;
         }
@@ -983,7 +1001,7 @@ public:
 
         if (size) {
             PVOID p = malloc(size);
-            if (GetAdapterField(StaticData.AdapterContext, params[1], p, size)) {
+            if (GetAdapterField(deviceContext, contextType, params[1], p, size)) {
 
             }
             free(p);
@@ -992,12 +1010,10 @@ public:
 protected:
     virtual void EnumerateAdapters(CPtrArray& Adapters) = 0;
     virtual PVOID GetAdapterContext(UINT Index, PVOID Adapter, PVOID& RaidContext) = 0;
-    CDebugExtension(PDEBUG_CLIENT Client, LPCSTR Module, LPCSTR MainContext) :
-        CClient(Client)
+    CDebugExtension(PDEBUG_CLIENT Client, LPCSTR Module, LPCSTR MainContext, LPCSTR RaidContext = NULL) :
+        CClient(Client), m_MainContext(MainContext), m_Module(Module), m_RaidContext(RaidContext)
     {
         LOG("%s %s", __FUNCTION__, Module);
-        m_Module = Module;
-        m_MainContext = MainContext;
         m_Result = m_Client.QueryInterface<IDebugSymbols>(&m_Symbols);
         if (m_Result != S_OK) {
             ERR("%s: Can't obtain IDebugSymbols", __FUNCTION__);
@@ -1506,7 +1522,8 @@ protected:
     CComPtr<IDebugDataSpaces> m_DataSpaces;
     CString m_Module;
     CString m_MainContext;
-    bool HasEAPI() const { return ExtensionApis.nSize; }
+    CString m_RaidContext;
+    static bool HasEAPI() { return ExtensionApis.nSize; }
 
     void WaitForDebugger()
     {
@@ -1517,21 +1534,23 @@ protected:
         Sleep(10000);
         DebugBreak();
     }
-    void GetDataFromContextField(PVOID Context, LPCSTR FieldName, PVOID Buffer, ULONG Length, ULONG& Result)
+    static void GetDataFromContextField(PVOID Context, LPCSTR ContextType, LPCSTR FieldName, PVOID Buffer, ULONG Length, ULONG& Result)
     {
         if (!HasEAPI()) {
             LOG("WDBG API is not available!");
             Result = INCORRECT_VERSION_INFO;
             return;
         }
-        Result = GetFieldData((ULONG_PTR)Context, m_MainContext, FieldName, Length, Buffer);
+        Result = GetFieldData((ULONG_PTR)Context, ContextType, FieldName, Length, Buffer);
     }
 
+#if 0 //(unused)
     // this could be one of more fields depending on FieldName
     bool GetContextFieldProperties(LPCSTR FieldName, /*OUT*/ CFieldsArray& Fields)
     {
         return QueryStructField(m_MainContext, FieldName, Fields);
     }
+#endif
 
     bool QueryStruct(LPCSTR StructName, /*OUT*/ CFieldInfo& Field, ULONG64 Offset = 0)
     {
@@ -1685,29 +1704,29 @@ protected:
         }
         return EXCEPTION_EXECUTE_HANDLER;
     }
-    bool GetAdapterField(PVOID Context, LPCSTR Name, PVOID& Value)
+    bool GetAdapterField(PVOID Context, LPCSTR Type, LPCSTR Name, PVOID& Value)
     {
-        return GetAdapterField(Context, Name, &Value, sizeof(Value));
+        return GetAdapterField(Context, Type, Name, &Value, sizeof(Value));
     }
-    bool GetAdapterField(PVOID Context, LPCSTR Name, ULONG& Value)
+    bool GetAdapterField(PVOID Context, LPCSTR Type, LPCSTR Name, ULONG& Value)
     {
-        return GetAdapterField(Context, Name, &Value, sizeof(Value));
+        return GetAdapterField(Context, Type, Name, &Value, sizeof(Value));
     }
-    bool GetAdapterField(PVOID Context, LPCSTR FieldName, PVOID Buffer, ULONG Length)
+    bool GetAdapterField(PVOID Context, LPCSTR Type, LPCSTR FieldName, PVOID Buffer, ULONG Length)
     {
         LOG("Getting (%p)->%s", Context, FieldName);
         ULONG res;
-        GetAdapterDataSafe(Context, FieldName, Buffer, Length, res);
+        GetStructDataSafe(Context, Type, FieldName, Buffer, Length, res);
         LOG("result: %X", res);
         if (res) {
             Output("  error %X(%s)\n", res, Name<eSYMBOL_ERROR>(res));
         }
         return !res;
     }
-    void GetAdapterDataSafe(PVOID Context, LPCSTR FieldName, PVOID Buffer, ULONG Length, ULONG& Result)
+    static void GetStructDataSafe(PVOID Context, LPCSTR ContextType, LPCSTR FieldName, PVOID Buffer, ULONG Length, ULONG& Result)
     {
         __try {
-            GetDataFromContextField(Context, FieldName, Buffer, Length, Result);
+            GetDataFromContextField(Context, ContextType, FieldName, Buffer, Length, Result);
         }
         __except (FilterException(GetExceptionInformation()->ExceptionRecord)) {
             Result = GetExceptionCode();
@@ -1749,7 +1768,7 @@ private:
 class CDebugExtensionModule : public CDebugExtension
 {
 public:
-    CDebugExtensionModule(PDEBUG_CLIENT Client, LPCSTR Module, LPCSTR MainContext = "DUMMY") : CDebugExtension(Client, Module, MainContext) {}
+    CDebugExtensionModule(PDEBUG_CLIENT Client, LPCSTR Module, LPCSTR MainContext = "DUMMY", LPCSTR RaidContext = NULL) : CDebugExtension(Client, Module, MainContext, RaidContext) {}
 };
 
 class CDebugExtensionNet : public CDebugExtensionModule
@@ -1775,7 +1794,7 @@ protected:
         if (context) {
             Output(", context %I64X, version %s\n", context, version.GetString());
             ULONG nQueues = 0;
-            if (GetAdapterField((PVOID)context, "nPathBundles", nQueues)) {
+            if (GetAdapterField((PVOID)context, m_MainContext, "nPathBundles", nQueues)) {
                 Output("#%d: %d queues\n", Index, nQueues);
             }
         }
@@ -1786,7 +1805,7 @@ protected:
 class CDebugExtensionStorage : public CDebugExtensionModule
 {
 public:
-    CDebugExtensionStorage(PDEBUG_CLIENT Client, LPCSTR Name, LPCSTR Context = "_ADAPTER_EXTENSION") : CDebugExtensionModule(Client, Name, Context) {}
+    CDebugExtensionStorage(PDEBUG_CLIENT Client, LPCSTR Name, LPCSTR Context = "_ADAPTER_EXTENSION") : CDebugExtensionModule(Client, Name, Context, "_RAID_ADAPTER_EXTENSION") {}
 protected:
     void EnumerateAdapters(CPtrArray& Adapters) override
     {
