@@ -820,7 +820,7 @@ public:
     {
         CPtrArray adapters;
         ULONG nSelected = 0;
-        if (Args && !Args) {
+        if (Args && *Args) {
             nSelected = atoi(Args);
         }
         EnumerateAdapters(adapters);
