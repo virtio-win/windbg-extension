@@ -826,9 +826,9 @@ public:
             PVOID mainContext, RaidContext = NULL;
             mainContext = GetAdapterContext(i, adapters[i], RaidContext);
             if (mainContext && i == nSelected) {
-                StaticData.AdapterContext = adapters[0];
+                StaticData.AdapterContext = mainContext;
                 StaticData.RaidContext = RaidContext;
-                Output("Adapter #%d selected\n", i);
+                Output("Adapter #%d selected (%p, %p)\n", i, StaticData.AdapterContext, StaticData.RaidContext);
             }
         }
     }
@@ -1840,14 +1840,13 @@ public:
         } else if (!s.CompareNoCase("vioscsi")) {
             m_Ext = new  CDebugExtensionVioscsi(Client);
         }
-        if (m_Ext) {
-            StaticData.AdapterContext = StaticData.RaidContext = NULL;
-        } else {
+        if (!m_Ext) {
             Output("Driver %s is not supported\n", Driver);
         }
     }
     void Update()
     {
+        StaticData.AdapterContext = StaticData.RaidContext = NULL;
         DriverModule = m_DriverName;
     }
     ~CDebugExtensionCreator()
