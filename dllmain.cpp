@@ -886,7 +886,7 @@ public:
         verbose(m_Client, "--help");
         Output("mp [index=0]        - find miniport and symbols in known places\n");
         Output("query               - read miniport field\n");
-        Output("findpdb <directory> - recursive find and append to symbol path\n");
+        Output("findpdb [directory] - recursive find and append to symbol path (nothing to browse)\n");
         Output("hv                  - dump Hyper-V fields\n");
         Output("cn                  - get computer name\n");
         Output("kshared             - get kshared stuff\n");
