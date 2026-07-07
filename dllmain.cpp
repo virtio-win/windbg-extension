@@ -7,9 +7,58 @@
 //#define THIS_IS_WINDBG_EXTENSION
 WINDBG_EXTENSION_APIS ExtensionApis;
 
-CString DriverModule = "netkvm";
-
 bool bVerbose;
+
+class CSelectedModuleKey : protected CRegKey
+{
+public:
+    CSelectedModuleKey()
+    {
+        auto result = Create(HKEY_CURRENT_USER, "Software\\RedHat\\dbgext\\");
+        if (result != ERROR_SUCCESS) {
+            VERBOSE("%s: => error %d", __FUNCTION__, result);
+        }
+    }
+    bool Get(CString& Name)
+    {
+        bool bChanged = true;
+        if (m_hKey && DriverModule.IsEmpty() && !GetString(DriverModule)) {
+            SetDefault();
+        } else if (!m_hKey) {
+            SetDefault();
+        } else {
+            bChanged = false;
+        }
+        Name = DriverModule;
+        return bChanged;
+    }
+    void Set(LPCSTR Name)
+    {
+        if (m_hKey) {
+            SetStringValue(m_ValueName, Name);
+        }
+        DriverModule = Name;
+    }
+protected:
+    LPCSTR m_ValueName = "TargetDriver";
+    static CString DriverModule;
+    bool GetString(CString& Value)
+    {
+        char buffer[32];
+        ULONG len = sizeof(buffer);
+        LSTATUS res = QueryStringValue(m_ValueName, buffer, &len);
+        if (res == ERROR_SUCCESS) {
+            Value = buffer;
+        }
+        return res == ERROR_SUCCESS;
+    }
+    void SetDefault()
+    {
+        Set("netkvm");
+    }
+};
+
+CString CSelectedModuleKey::DriverModule;
 
 class CClient
 {
@@ -1844,15 +1893,20 @@ CDebugExtension::CStaticData CDebugExtension::StaticData;
 class CDebugExtensionCreator : public CDebugExtensionModule
 {
 public:
-    CDebugExtensionCreator(LPCSTR Driver, PDEBUG_CLIENT Client) :
-        m_DriverName(Driver),
+    CDebugExtensionCreator(PDEBUG_CLIENT Client, LPCSTR DriverName = NULL) :
+        m_DriverName(DriverName),
         CDebugExtensionModule(Client, "")
     {
-        if (Driver == NULL || *Driver == 0) {
-            Output("Current driver is %s\n", DriverModule.GetString());
+        CSelectedModuleKey key;
+        CString s;
+        bool bChanged = key.Get(s);
+        if (DriverName && *DriverName == 0) {
+            Output("Current driver is %s\n", s.GetString());
             return;
         }
-        CString s = Driver;
+        if (DriverName) {
+            s = DriverName;
+        }
         if (!s.CompareNoCase("netkvm")) {
             m_Ext = new CDebugExtensionNet(Client);
         } else if (!s.CompareNoCase("viostor")) {
@@ -1861,13 +1915,16 @@ public:
             m_Ext = new  CDebugExtensionVioscsi(Client);
         }
         if (!m_Ext) {
-            Output("Driver %s is not supported\n", Driver);
+            Output("Driver %s is not supported\n", s.GetString());
+        } else if (bChanged) {
+            Output("Driver name: %s\n", s.GetString());
         }
     }
     void Update()
     {
+        CSelectedModuleKey key;
         StaticData.AdapterContext = StaticData.RaidContext = NULL;
-        DriverModule = m_DriverName;
+        key.Set(m_DriverName);
     }
     ~CDebugExtensionCreator()
     {
@@ -1882,7 +1939,7 @@ protected:
 private:
     CDebugExtensionModule* m_Ext = NULL;
     void mp(LPCSTR Args) override {}
-    CString m_DriverName;
+    LPCSTR m_DriverName;
 };
 
 class CDebugExtensionNt : public CDebugExtensionModule
@@ -1947,7 +2004,7 @@ protected:
 extern "C" __declspec(dllexport) HRESULT help(IN PDEBUG_CLIENT Client, IN PCSTR Args)
 {
     VERBOSE("%s: =>", __FUNCTION__);
-    CDebugExtensionCreator e(DriverModule, Client);
+    CDebugExtensionCreator e(Client);
     if (e.Obj()) {
         e.Obj()->help();
     }
@@ -1958,7 +2015,7 @@ extern "C" __declspec(dllexport) HRESULT help(IN PDEBUG_CLIENT Client, IN PCSTR 
 extern "C" __declspec(dllexport) HRESULT mp(IN PDEBUG_CLIENT Client, IN PCSTR Args)
 {
     VERBOSE("%s: =>", __FUNCTION__);
-    CDebugExtensionCreator e(DriverModule, Client);
+    CDebugExtensionCreator e(Client);
     if (e.Obj()) {
         e.Obj()->mp(Args);
     }
@@ -1978,7 +2035,7 @@ extern "C" __declspec(dllexport) HRESULT test(IN PDEBUG_CLIENT Client, IN PCSTR 
 extern "C" __declspec(dllexport) HRESULT findpdb(IN PDEBUG_CLIENT Client, IN PCSTR Args)
 {
     VERBOSE("%s: =>", __FUNCTION__);
-    CDebugExtensionCreator e(DriverModule, Client);
+    CDebugExtensionCreator e(Client);
     if (e.Obj()) {
         e.Obj()->findpdb(Args);
     }
@@ -1989,7 +2046,7 @@ extern "C" __declspec(dllexport) HRESULT findpdb(IN PDEBUG_CLIENT Client, IN PCS
 extern "C" __declspec(dllexport) HRESULT query(IN PDEBUG_CLIENT Client, IN PCSTR Args)
 {
     VERBOSE("%s: =>", __FUNCTION__);
-    CDebugExtensionCreator e(DriverModule, Client);
+    CDebugExtensionCreator e(Client);
     if (e.Obj()) {
         e.Obj()->query(Args);
     }
@@ -2025,7 +2082,7 @@ extern "C" __declspec(dllexport) HRESULT kshared(IN PDEBUG_CLIENT Client, IN PCS
 extern "C" __declspec(dllexport) HRESULT driver(IN PDEBUG_CLIENT Client, IN PCSTR Args)
 {
     VERBOSE("%s: =>", __FUNCTION__);
-    CDebugExtensionCreator e(Args, Client);
+    CDebugExtensionCreator e(Client, Args ? Args : "");
     if (e.Obj()) {
         e.Update();
         e.Obj()->mp();
