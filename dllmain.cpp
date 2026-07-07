@@ -870,20 +870,21 @@ public:
             contextType = m_RaidContext;
         }
         if (params.GetCount() < 2) {
-            Output("!virtio.query %s <option> <field of %s> [n],.field.field,.*,.! applicable\n", m_RaidContext ? "[-r]" : "", m_MainContext);
-            if (m_RaidContext) {
+            Output("!virtio.query %s <option> <field of %s> [n],.field.field,.*,.! applicable\n", m_RaidContext.IsEmpty() ? "" : "[-r]", m_MainContext);
+            if (!m_RaidContext.IsEmpty()) {
                 Output("   -r   use storport RAID extension (%s) instead of ADAPTER extension\n", m_RaidContext);
             }
             Output("Options:               \n");
-            Output("   e    evaluate as is\n");
+            Output("   a    get size, offset, type then read\n");
+            Output("   ts   read as timestamp (system time)\n");
+            Output("   l    {path to root entry} - dump list\n");
+            Output(" less useful options:  \n");
             Output("   g    read global variable\n");
             Output("   t    traverse from type to fields\n");
-            Output("   ts   read as timestamp (system time)\n");
             Output("   d    read as dword or less\n");
             Output("   p    read as pointer\n");
             Output("   s    get size, offset, type\n");
-            Output("   a    get size, offset, type then read\n");
-            Output("   l    {path to root entry} - dump list\n");
+            Output("   e    evaluate as is\n");
             Output("   k    {kd data index} [size] - ReadDebuggerData\n");
             return;
         }
